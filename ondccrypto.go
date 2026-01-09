@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,6 +39,116 @@ type CreateVLookupSignatureParams struct {
 }
 
 var authHeaderKVRe = regexp.MustCompile(`\s*([^=]+)=([^,]+)[,]?`)
+
+type Logger interface {
+	Printf(format string, v ...any)
+}
+
+var logger Logger = log.Default()
+
+// SetLogger allows callers to provide their own logger. Pass nil to disable logging.
+func SetLogger(l Logger) {
+	logger = l
+}
+
+var nowUnix = func() int64 { return time.Now().Unix() }
+
+const defaultTTLSeconds int64 = 60 * 60
+
+type CreateAuthorisationHeaderParams struct {
+	Payload     string
+	PrivateKey  string
+	SubscriberID string
+	UniqueKeyID string
+}
+
+type VerifyAuthorisationHeaderParams struct {
+	AuthHeader string
+	Payload    string
+	PublicKey  string
+}
+
+// CreateAuthorisationHeader creates the ONDC Authorization header.
+// This preserves the payload exactly as provided (no JSON parsing/canonicalization).
+func CreateAuthorisationHeader(p CreateAuthorisationHeaderParams) (string, error) {
+	created := strconv.FormatInt(nowUnix(), 10)
+	expires := strconv.FormatInt(nowUnix()+defaultTTLSeconds, 10)
+
+	signingString, _, _, err := createSigningString(p.Payload, created, expires)
+	if err != nil {
+		logf("CreateAuthorisationHeader: signing string error: %v", err)
+		return "", err
+	}
+
+	signature, err := signMessage(signingString, p.PrivateKey)
+	if err != nil {
+		logf("CreateAuthorisationHeader: sign error: %v", err)
+		return "", err
+	}
+
+	header := fmt.Sprintf(
+		`Signature keyId="%s|%s|ed25519",algorithm="ed25519",created="%s",expires="%s",headers="(created) (expires) digest",signature="%s"`,
+		p.SubscriberID,
+		p.UniqueKeyID,
+		created,
+		expires,
+		signature,
+	)
+	return header, nil
+}
+
+// VerifyAuthorisationHeader verifies the ONDC Authorization header.
+// It validates timestamps (created <= now <= expires) and verifies the signature.
+// Returns (true, nil) when valid, otherwise (false, error).
+func VerifyAuthorisationHeader(p VerifyAuthorisationHeaderParams) (bool, error) {
+	parts := splitAuthHeader(p.AuthHeader)
+	createdStr, ok := parts["created"]
+	if !ok || createdStr == "" {
+		return false, errors.New("missing created")
+	}
+	expiresStr, ok := parts["expires"]
+	if !ok || expiresStr == "" {
+		return false, errors.New("missing expires")
+	}
+	signatureB64, ok := parts["signature"]
+	if !ok || signatureB64 == "" {
+		return false, errors.New("missing signature")
+	}
+
+	created, err := strconv.ParseInt(createdStr, 10, 64)
+	if err != nil {
+		return false, errors.New("invalid created")
+	}
+	expires, err := strconv.ParseInt(expiresStr, 10, 64)
+	if err != nil {
+		return false, errors.New("invalid expires")
+	}
+
+	now := nowUnix()
+	if created > now {
+		return false, errors.New("created is in the future")
+	}
+	if now > expires {
+		return false, errors.New("authorization header expired")
+	}
+
+	signingString, _, _, err := createSigningString(p.Payload, createdStr, expiresStr)
+	if err != nil {
+		logf("VerifyAuthorisationHeader: signing string error: %v", err)
+		return false, err
+	}
+
+	okSig, err := verifyMessage(signatureB64, signingString, p.PublicKey)
+	if err != nil {
+		logf("VerifyAuthorisationHeader: verify error: %v", err)
+		return false, err
+	}
+	if !okSig {
+		return false, errors.New("invalid signature")
+	}
+
+	return true, nil
+}
 
 func CreateAuthorizationHeader(p CreateAuthorizationHeaderParams) (string, error) {
 	signingString, created, expires, err := createSigningString(p.Body, p.Created, p.Expires)
@@ -111,15 +222,12 @@ func createSigningString(message, created, expires string) (signingString string
 }
 
 func signMessage(signingString, privateKeyB64 string) (string, error) {
-	privateKeyBytes, err := decodeBase64Original(privateKeyB64)
+	privateKey, err := parseEd25519PrivateKey(privateKeyB64)
 	if err != nil {
 		return "", err
 	}
-	if len(privateKeyBytes) != ed25519.PrivateKeySize {
-		return "", fmt.Errorf("invalid ed25519 private key length: got %d, want %d", len(privateKeyBytes), ed25519.PrivateKeySize)
-	}
 
-	sig := ed25519.Sign(ed25519.PrivateKey(privateKeyBytes), []byte(signingString))
+	sig := ed25519.Sign(privateKey, []byte(signingString))
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
@@ -193,4 +301,27 @@ func decodeBase64Original(s string) ([]byte, error) {
 		return b2, nil
 	}
 	return nil, err
+}
+
+func parseEd25519PrivateKey(privateKeyB64 string) (ed25519.PrivateKey, error) {
+	keyBytes, err := decodeBase64Original(privateKeyB64)
+	if err != nil {
+		return nil, err
+	}
+	// Requirement: private key may be 32-byte seed or 64-byte expanded private key.
+	switch len(keyBytes) {
+	case ed25519.SeedSize:
+		return ed25519.NewKeyFromSeed(keyBytes), nil
+	case ed25519.PrivateKeySize:
+		return ed25519.PrivateKey(keyBytes), nil
+	default:
+		return nil, fmt.Errorf("invalid ed25519 private key length: got %d, want %d or %d", len(keyBytes), ed25519.SeedSize, ed25519.PrivateKeySize)
+	}
+}
+
+func logf(format string, v ...any) {
+	if logger == nil {
+		return
+	}
+	logger.Printf(format, v...)
 }
