@@ -5,7 +5,7 @@ Go implementation of ONDC signing/verification headers with **exact parity** to 
 ## Install
 
 ```bash
-go get github.com/<you>/ondc-crypto-sdk-go@v0.1.0
+go get github.com/ONDC-Official/ondc-crypto-sdk-go@v0.1.0
 ```
 
 ## Usage
@@ -47,6 +47,7 @@ sig, err := ondccrypto.CreateVLookupSignature(ondccrypto.CreateVLookupSignatureP
 ```
 
 ## Notes (parity)
+
 - Digest: BLAKE2b-512 and `digest: BLAKE-512=...` line.
 - Signature: Ed25519 detached signature (base64 standard/padded).
 - No JSON canonicalization: the exact raw request body string is signed.
