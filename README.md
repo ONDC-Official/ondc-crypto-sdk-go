@@ -5,10 +5,44 @@ Go implementation of ONDC signing/verification headers with **exact parity** to 
 ## Install
 
 ```bash
-go get github.com/ONDC-Official/ondc-crypto-sdk-go@v0.1.0
+go get github.com/ONDC-Official/ondc-crypto-sdk-go@v0.2.0
 ```
 
 ## Usage
+
+## Recommended API (with timestamp validation)
+
+These APIs match the required behavior for ONDC authorization header creation and verification:
+
+### Create authorisation header
+
+```go
+header, err := ondccrypto.CreateAuthorisationHeader(ondccrypto.CreateAuthorisationHeaderParams{
+	Payload:      rawBody,            // exact raw JSON string
+	PrivateKey:   privateKeyBase64,   // base64 ed25519 private key: 32-byte seed OR 64-byte private key
+	SubscriberID: subscriberID,
+	UniqueKeyID:  ukid,
+})
+```
+
+### Verify authorisation header
+
+```go
+ok, err := ondccrypto.VerifyAuthorisationHeader(ondccrypto.VerifyAuthorisationHeaderParams{
+	AuthHeader: authHeader,
+	Payload:    rawBody,          // must match exactly what was signed
+	PublicKey:  publicKeyBase64,  // base64 of 32-byte ed25519 public key
+})
+```
+
+Behavior:
+
+- Validates timestamps: `created <= now <= expires`
+- Returns `(false, error)` on invalid headers/signatures
+
+## Node-parity API (legacy)
+
+These functions mirror the Node SDK behavior exactly, including permissive verification semantics.
 
 ### Create Authorization header
 
@@ -52,3 +86,13 @@ sig, err := ondccrypto.CreateVLookupSignature(ondccrypto.CreateVLookupSignatureP
 - Signature: Ed25519 detached signature (base64 standard/padded).
 - No JSON canonicalization: the exact raw request body string is signed.
 - `IsHeaderValid` is permissive like Node: returns `false` on any error and does not enforce expiry.
+
+## Logging
+
+By default the package logs errors via the standard library logger. Disable or replace it:
+
+```go
+ondccrypto.SetLogger(nil) // disable
+// or
+ondccrypto.SetLogger(myLogger)
+```
